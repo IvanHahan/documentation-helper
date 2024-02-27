@@ -1,37 +1,53 @@
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import os
-from langchain.document_loaders import ReadTheDocsLoader
+
+from langchain_community.document_loaders import ReadTheDocsLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Pinecone
-import pinecone
+from langchain_community.vectorstores.faiss import FAISS
+from langchain.embeddings.huggingface_hub import HuggingFaceHubEmbeddings
+from tqdm import tqdm
 
-from consts import INDEX_NAME
-
-pinecone.init(
-    api_key=os.environ["PINECONE_API_KEY"],
-    environment=os.environ["PINECONE_ENVIRONMENT_REGION"],
-)
+def batchify(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
 
 
-def ingest_docs() -> None:
-    loader = ReadTheDocsLoader(path="langchain-docs/langchain.readthedocs.io/en/latest")
-    raw_documents = loader.load()
-    print(f"loaded {len(raw_documents) }documents")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=100, separators=["\n\n", "\n", " ", ""]
+INDEX_NAME = "langchain-doc-index"
+
+
+def ingest_docs():
+    loader = ReadTheDocsLoader(
+        "langchain-docs/langchain.readthedocs.io/en/latest/modules/chains"
     )
-    documents = text_splitter.split_documents(documents=raw_documents)
-    print(f"Splitted into {len(documents)} chunks")
 
+    raw_documents = loader.load()
+    print(f"loaded {len(raw_documents)} documents")
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
+    documents = text_splitter.split_documents(raw_documents)
+    print(f'Splitted into {len(documents)} chunks')
+    
     for doc in documents:
-        old_path = doc.metadata["source"]
-        new_url = old_path.replace("langchain-docs", "https:/")
+        new_url = doc.metadata["source"]
+        new_url = new_url.replace("langchain-docs", "https:/")
         doc.metadata.update({"source": new_url})
 
-    print(f"Going to insert {len(documents)} to Pinecone")
-    embeddings = OpenAIEmbeddings()
-    Pinecone.from_documents(documents, embeddings, index_name=INDEX_NAME)
-    print("****** Added to Pinecone vectorstore vectors")
+    embeddings = HuggingFaceHubEmbeddings(
+        huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    )
+    print(f"Going to add {len(documents)} to Pinecone")
+    
+    for i, doc_batch in tqdm(enumerate(batchify(documents, 50))):
+        if i == 0:
+            db = FAISS.from_documents(doc_batch, embeddings)
+        else:
+            db.add_documents(doc_batch)
+    db.save_local('langchain-docs')
+    print("****Loading to vectorstore done ***")
 
 
 if __name__ == "__main__":
